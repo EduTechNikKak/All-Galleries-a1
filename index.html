@@ -45,6 +45,8 @@
     const IconTrash2 = ({ size=24, className="" }) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>;
     const IconAlertTriangle = ({ size=24, className="" }) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>;
     const IconDownload = ({ size=24, className="" }) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>;
+    const IconChevronLeft = ({ size=24, className="" }) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>;
+    const IconChevronRight = ({ size=24, className="" }) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>;
 
     // ตรวจสอบ OS สำหรับการแชร์ดาวน์โหลด
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -65,7 +67,7 @@
       const [isDownloadMode, setIsDownloadMode] = useState(false);
       const [selectedDownloadIds, setSelectedDownloadIds] = useState([]);
       const [isDownloading, setIsDownloading] = useState(false);
-      const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0, status: '' });
+      const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0, status: '', loadedMB: '0.00', totalMB: '0.00' });
 
       // Auth & Password State
       const [showAuthModal, setShowAuthModal] = useState(false);
@@ -95,6 +97,25 @@
       const [showDeleteModal, setShowDeleteModal] = useState(false);
       const [isProcessing, setIsProcessing] = useState(false);
 
+      // Swipe State สำหรับเลื่อนรูปซ้าย-ขวาใน Modal
+      const [touchStart, setTouchStart] = useState(null);
+      const [touchEnd, setTouchEnd] = useState(null);
+      const minSwipeDistance = 50;
+
+      const onTouchStart = (e) => {
+        setTouchEnd(null);
+        setTouchStart(e.targetTouches[0].clientX);
+      };
+      const onTouchMove = (e) => setTouchEnd(e.targetTouches[0].clientX);
+      const onTouchEndSwipe = (currentIndex, galleryList) => {
+        if (!touchStart || !touchEnd) return;
+        const distance = touchStart - touchEnd;
+        const isLeftSwipe = distance > minSwipeDistance;
+        const isRightSwipe = distance < -minSwipeDistance;
+        if (isLeftSwipe && currentIndex < galleryList.length - 1) setSelectedImage(galleryList[currentIndex + 1]);
+        if (isRightSwipe && currentIndex > 0) setSelectedImage(galleryList[currentIndex - 1]);
+      };
+
       const showToast = (message, type = 'success') => {
         setToastMessage(message);
         setToastType(type);
@@ -120,6 +141,52 @@
           }
         } catch (error) {
           return { success: false, error: "ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้" };
+        }
+      };
+
+      // ฟังก์ชันสำหรับดาวน์โหลดแบบ Stream (เพื่อแทร็กขนาดไฟล์ MB สดๆ)
+      const apiCallDownload = async (body, onProgress) => {
+        try {
+          const options = {
+            method: 'POST',
+            redirect: 'follow',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(body)
+          };
+          
+          const response = await fetch(GAS_URL, options);
+          if (!response.body) throw new Error("ReadableStream not supported");
+          
+          const reader = response.body.getReader();
+          const contentLength = response.headers.get('Content-Length');
+          // ถ้า Backend ไม่ส่งขนาดมาให้ใช้ '?'
+          const totalMB = contentLength ? (parseInt(contentLength) / (1024 * 1024)).toFixed(2) : '?';
+          
+          let receivedLength = 0;
+          let chunks = [];
+          
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            receivedLength += value.length;
+            
+            // แปลง Byte เป็น MB
+            const loadedMB = (receivedLength / (1024 * 1024)).toFixed(2);
+            onProgress(loadedMB, totalMB);
+          }
+          
+          const chunksAll = new Uint8Array(receivedLength);
+          let position = 0;
+          for (let chunk of chunks) {
+            chunksAll.set(chunk, position);
+            position += chunk.length;
+          }
+          
+          const textResponse = new TextDecoder("utf-8").decode(chunksAll);
+          return { success: true, data: JSON.parse(textResponse) };
+        } catch (error) {
+          return { success: false, error: "เกิดข้อผิดพลาดในการดาวน์โหลด" };
         }
       };
 
@@ -266,7 +333,8 @@
             description: file.description,
             link: file.link,
             tabName: finalTabName,
-            base64: finalBase64
+            base64: finalBase64,
+            quality: uploadQuality === 'web' ? 'UPsoft' : 'UPfull' // ส่งคุณภาพไฟล์ไป Backend
           });
         }
 
@@ -286,12 +354,14 @@
       };
 
       const getBlobFromUrlOrProxy = async (url, fileId) => {
+        // ข้ามการดึงภาพจาก URL (CDN) เพราะไฟล์จะถูกบีบอัด
+        // บังคับใช้ Proxy ดึงไฟล์ต้นฉบับจาก Drive โดยตรง 100%
         try {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error("CORS");
-          return await response.blob();
-        } catch (error) {
-          const proxyRes = await apiCall('POST', { action: 'download_proxy', fileId: fileId });
+          // เรียกใช้ฟังก์ชัน apiCallDownload เพื่อแทร็ก progress สดๆ
+          const proxyRes = await apiCallDownload({ action: 'download_proxy', fileId: fileId }, (loaded, total) => {
+             setDownloadProgress(prev => ({ ...prev, loadedMB: loaded, totalMB: total }));
+          });
+          
           if (proxyRes.success && proxyRes.data.status === 'success') {
             const byteCharacters = atob(proxyRes.data.base64);
             const byteNumbers = new Array(byteCharacters.length);
@@ -299,24 +369,37 @@
               byteNumbers[i] = byteCharacters.charCodeAt(i);
             }
             const byteArray = new Uint8Array(byteNumbers);
+            
+            // อัปเดตขนาดที่แท้จริงหลังจากคำนวณ Base64 เสร็จ
+            const actualMB = (byteArray.length / (1024 * 1024)).toFixed(2);
+            setDownloadProgress(prev => ({ ...prev, loadedMB: actualMB, totalMB: actualMB }));
+            
             return new Blob([byteArray], { type: proxyRes.data.mimeType });
           }
-          throw new Error("Unable to download image");
+          throw new Error("Proxy download failed");
+        } catch (error) {
+          throw new Error("Unable to download original image");
         }
       };
 
       const processDownloads = async (imagesToDownload) => {
         setIsDownloading(true);
-        setDownloadProgress({ current: 0, total: imagesToDownload.length, status: 'กำลังเตรียมไฟล์...' });
+        setDownloadProgress({ current: 0, total: imagesToDownload.length, status: 'กำลังเตรียมไฟล์...', loadedMB: '0.00', totalMB: '0.00' });
         
         if (isIOS) {
           try {
             const filesArray = [];
             for (let i = 0; i < imagesToDownload.length; i++) {
               const imgData = imagesToDownload[i];
-              setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดึงข้อมูล: ${imgData.ImageName || 'รูปภาพ'}` });
+              setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดึงข้อมูล: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
+              
               const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
-              const file = new File([blob], `${imgData.ImageName || 'image_'+i}.jpg`, { type: blob.type || 'image/jpeg' });
+              
+              // ดึงนามสกุลไฟล์จาก MIME Type ของ Blob (ดักจับ jpeg ให้เป็น jpg เพื่อความสวยงาม)
+              let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
+              if (ext === 'jpeg') ext = 'jpg';
+              
+              const file = new File([blob], `${imgData.ImageName || 'image_'+i}.${ext}`, { type: blob.type || 'image/jpeg' });
               filesArray.push(file);
             }
             setDownloadProgress(prev => ({ ...prev, status: 'กำลังเปิดหน้าต่างบันทึก...' }));
@@ -332,13 +415,18 @@
         } else {
           for (let i = 0; i < imagesToDownload.length; i++) {
             const imgData = imagesToDownload[i];
-            setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดาวน์โหลด: ${imgData.ImageName || 'รูปภาพ'}` });
+            setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดาวน์โหลด: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
             try {
               const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
+              
+              // ดึงนามสกุลไฟล์จาก MIME Type ของ Blob
+              let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
+              if (ext === 'jpeg') ext = 'jpg';
+              
               const blobUrl = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = blobUrl;
-              a.download = `${imgData.ImageName || 'image_'+i}.jpg`;
+              a.download = `${imgData.ImageName || 'image_'+i}.${ext}`;
               document.body.appendChild(a);
               a.click();
               document.body.removeChild(a);
@@ -396,6 +484,9 @@
       
       const galleryImages = activeTab === 'All' ? images : images.filter(img => img.TabName === activeTab);
       const adminImages = adminTab === 'All' ? images : images.filter(img => img.TabName === adminTab);
+      
+      // หา index ของรูปที่เปิดอยู่ เพื่อใช้สำหรับการเลื่อน ซ้าย-ขวา
+      const currentImageIndex = selectedImage ? galleryImages.findIndex(img => img.ID === selectedImage.ID) : -1;
 
       return (
         <div className="min-h-screen text-gray-800 font-sans selection:bg-gray-200 pb-20 md:pb-0">
@@ -420,7 +511,14 @@
                 <div className="w-full bg-gray-100 rounded-full h-2 mb-2 overflow-hidden">
                   <div className="bg-blue-600 h-2 rounded-full transition-all duration-300" style={{ width: `${(downloadProgress.current / downloadProgress.total) * 100}%` }}></div>
                 </div>
-                <p className="text-[11px] font-semibold text-gray-700">{downloadProgress.current} / {downloadProgress.total} รูปภาพ</p>
+                <p className="text-[11px] font-semibold text-gray-700 mt-2">
+                  รูปที่ {downloadProgress.current} / {downloadProgress.total} 
+                  {downloadProgress.loadedMB !== '0.00' && (
+                    <span className="ml-1 text-blue-600">
+                      ({downloadProgress.loadedMB} MB {downloadProgress.totalMB !== '?' ? `/ ${downloadProgress.totalMB} MB` : ''})
+                    </span>
+                  )}
+                </p>
               </div>
             </div>
           )}
@@ -765,12 +863,45 @@
           {/* Single Image Modal */}
           {selectedImage && (
             <div className="fixed inset-0 z-[60] bg-white md:bg-white/95 md:blur-backdrop flex flex-col md:flex-row md:items-center justify-center md:p-8 animate-fade-in">
-              <button onClick={() => setSelectedImage(null)} className="absolute top-4 right-4 md:top-6 md:right-6 p-2 bg-gray-100/80 rounded-full z-[70] blur-backdrop"><IconX size={20} /></button>
-              <div className="w-full h-[50vh] md:h-[80vh] md:w-2/3 bg-gray-50 flex items-center justify-center md:rounded-3xl overflow-hidden shrink-0">
-                <img src={selectedImage.DriveFileUrl} alt={selectedImage.ImageName} className="w-full h-full object-contain" />
+              <button onClick={() => setSelectedImage(null)} className="absolute top-4 right-4 md:top-6 md:right-6 p-2 bg-gray-100/80 rounded-full z-[80] blur-backdrop shadow-sm"><IconX size={20} /></button>
+              
+              {/* ปุ่มเลื่อนซ้าย */}
+              {currentImageIndex > 0 && (
+                <button 
+                  onClick={(e) => { e.stopPropagation(); setSelectedImage(galleryImages[currentImageIndex - 1]); }}
+                  className="hidden md:flex absolute left-4 top-1/2 -translate-y-1/2 p-3 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow-lg transition-all z-[80] active:scale-95 blur-backdrop"
+                >
+                  <IconChevronLeft size={28} />
+                </button>
+              )}
+              
+              {/* ปุ่มเลื่อนขวา */}
+              {currentImageIndex < galleryImages.length - 1 && (
+                <button 
+                  onClick={(e) => { e.stopPropagation(); setSelectedImage(galleryImages[currentImageIndex + 1]); }}
+                  className="hidden md:flex absolute right-4 top-1/2 -translate-y-1/2 p-3 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow-lg transition-all z-[80] active:scale-95 blur-backdrop"
+                >
+                  <IconChevronRight size={28} />
+                </button>
+              )}
+
+              <div 
+                className="w-full h-[50vh] md:h-[80vh] md:w-2/3 bg-gray-50 flex items-center justify-center md:rounded-3xl overflow-hidden shrink-0 relative"
+                onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={() => onTouchEndSwipe(currentImageIndex, galleryImages)}
+              >
+                <img src={selectedImage.DriveFileUrl} alt={selectedImage.ImageName} className="w-full h-full object-contain select-none" />
               </div>
               <div className="w-full h-[50vh] md:h-auto md:w-1/3 px-6 py-8 flex flex-col justify-start md:justify-center bg-white rounded-t-3xl -mt-6 md:mt-0 relative z-[65] overflow-y-auto hidden-scrollbar shadow-[0_-10px_40px_rgba(0,0,0,0.05)] md:shadow-none">
-                <span className="inline-block px-3 py-1 bg-gray-100 text-gray-600 text-[11px] font-semibold rounded-full mb-3 w-max">{selectedImage.TabName}</span>
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <span className="inline-block px-3 py-1 bg-gray-100 text-gray-600 text-[11px] font-semibold rounded-full w-max">
+                    {selectedImage.TabName}
+                  </span>
+                  {selectedImage.Quality && (
+                    <span className={`inline-block px-3 py-1 text-[11px] font-semibold rounded-full w-max ${selectedImage.Quality === 'UPfull' ? 'bg-purple-100 text-purple-600' : 'bg-green-100 text-green-600'}`}>
+                      {selectedImage.Quality}
+                    </span>
+                  )}
+                </div>
                 <h2 className="text-2xl md:text-3xl font-bold mb-2 leading-tight">{selectedImage.ImageName}</h2>
                 <p className="text-gray-600 leading-relaxed mb-6 text-[14px] md:text-[15px]">{selectedImage.Description || 'ไม่มีคำอธิบาย'}</p>
                 <div className="flex flex-col gap-3 mt-auto md:mt-0 pb-6 md:pb-0">
