@@ -218,23 +218,15 @@
         const newStaged = [];
         for (const file of files) {
           if (!file.type.startsWith('image/')) continue;
-          let base64Data;
-          if (uploadQuality === 'original') {
-            base64Data = await new Promise((res) => {
-              const r = new FileReader();
-              r.onload = ev => res(ev.target.result);
-              r.readAsDataURL(file);
-            });
-          } else {
-            base64Data = await convertFileToWebP(file);
-          }
+          
+          // เก็บไฟล์ต้นฉบับไว้ก่อน ยังไม่แปลง Base64 ตอนนี้
           newStaged.push({
             id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2),
             imageName: file.name.split('.')[0],
             description: '',
             link: '',
-            base64: base64Data,
-            preview: base64Data
+            rawFile: file, // เก็บไฟล์ดิบไว้ใช้ตอนกดอัพโหลด
+            preview: URL.createObjectURL(file) // สร้าง URL จำลองให้แสดงภาพตัวอย่าง
           });
         }
         setStagedFiles(prev => [...prev, ...newStaged]);
@@ -251,17 +243,38 @@
         if (!finalTabName) { showToast("กรุณาระบุชื่อแท็บ", 'error'); return; }
 
         setIsUploading(true);
-        const payloadImages = stagedFiles.map(file => ({
-          imageName: file.imageName || 'Untitled',
-          description: file.description,
-          link: file.link,
-          tabName: finalTabName,
-          base64: file.base64
-        }));
+        const payloadImages = [];
+        
+        // ประมวลผลภาพก่อนส่งเข้า API
+        for (let i = 0; i < stagedFiles.length; i++) {
+          const file = stagedFiles[i];
+          let finalBase64;
+          
+          // เช็คเงื่อนไขคุณภาพไฟล์ ณ วินาทีที่กดอัพโหลด
+          if (uploadQuality === 'original') {
+            finalBase64 = await new Promise((res) => {
+              const r = new FileReader();
+              r.onload = ev => res(ev.target.result);
+              r.readAsDataURL(file.rawFile);
+            });
+          } else {
+            finalBase64 = await convertFileToWebP(file.rawFile);
+          }
+
+          payloadImages.push({
+            imageName: file.imageName || 'Untitled',
+            description: file.description,
+            link: file.link,
+            tabName: finalTabName,
+            base64: finalBase64
+          });
+        }
 
         const result = await apiCall('POST', { action: "upload", images: payloadImages });
         if (result.success && result.data.status === 'success') {
           showToast("อัพโหลดสำเร็จ!", 'success');
+          // คืนค่าหน่วยความจำที่ใช้แสดงภาพตัวอย่าง
+          stagedFiles.forEach(f => URL.revokeObjectURL(f.preview));
           setStagedFiles([]);
           setIsGlobalNewTab(false);
           setGlobalNewTabName('');
