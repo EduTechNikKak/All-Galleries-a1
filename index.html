@@ -98,6 +98,12 @@
       const [showDeleteModal, setShowDeleteModal] = useState(false);
       const [isProcessing, setIsProcessing] = useState(false);
 
+      // Bulk Edit State
+      const [showBulkEditModal, setShowBulkEditModal] = useState(false);
+      const [bulkSelectedTab, setBulkSelectedTab] = useState('General');
+      const [bulkIsNewTab, setBulkIsNewTab] = useState(false);
+      const [bulkNewTabName, setBulkNewTabName] = useState('');
+
       // Swipe State สำหรับเลื่อนรูปซ้าย-ขวาใน Modal
       const [touchStart, setTouchStart] = useState(null);
       const [touchEnd, setTouchEnd] = useState(null);
@@ -147,7 +153,6 @@
         }
       };
 
-      // ฟังก์ชันสำหรับดาวน์โหลดแบบ Stream (เพื่อแทร็กขนาดไฟล์ MB สดๆ)
       const apiCallDownload = async (body, onProgress) => {
         try {
           const options = {
@@ -162,7 +167,6 @@
           
           const reader = response.body.getReader();
           const contentLength = response.headers.get('Content-Length');
-          // ถ้า Backend ไม่ส่งขนาดมาให้ใช้ '?'
           const totalMB = contentLength ? (parseInt(contentLength) / (1024 * 1024)).toFixed(2) : '?';
           
           let receivedLength = 0;
@@ -174,7 +178,6 @@
             chunks.push(value);
             receivedLength += value.length;
             
-            // แปลง Byte เป็น MB
             const loadedMB = (receivedLength / (1024 * 1024)).toFixed(2);
             onProgress(loadedMB, totalMB);
           }
@@ -194,10 +197,7 @@
       };
 
       const getBlobFromUrlOrProxy = async (url, fileId) => {
-        // ข้ามการดึงภาพจาก URL (CDN) เพราะไฟล์จะถูกบีบอัด
-        // บังคับใช้ Proxy ดึงไฟล์ต้นฉบับจาก Drive โดยตรง 100%
         try {
-          // เรียกใช้ฟังก์ชัน apiCallDownload เพื่อแทร็ก progress สดๆ
           const proxyRes = await apiCallDownload({ action: 'download_proxy', fileId: fileId }, (loaded, total) => {
              setDownloadProgress(prev => ({ ...prev, loadedMB: loaded, totalMB: total }));
           });
@@ -209,11 +209,8 @@
               byteNumbers[i] = byteCharacters.charCodeAt(i);
             }
             const byteArray = new Uint8Array(byteNumbers);
-            
-            // อัปเดตขนาดที่แท้จริงหลังจากคำนวณ Base64 เสร็จ
             const actualMB = (byteArray.length / (1024 * 1024)).toFixed(2);
             setDownloadProgress(prev => ({ ...prev, loadedMB: actualMB, totalMB: actualMB }));
-            
             return new Blob([byteArray], { type: proxyRes.data.mimeType });
           }
           throw new Error("Proxy download failed");
@@ -228,12 +225,10 @@
         
         try {
           if (imagesToDownload.length === 1) {
-            // --- กรณี 1: โหลดรูปเดียว (Direct Download) ---
             const imgData = imagesToDownload[0];
             setDownloadProgress({ current: 1, total: 1, status: `กำลังดาวน์โหลด: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
             
             const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
-            
             let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
             if (ext === 'jpeg') ext = 'jpg';
             
@@ -254,30 +249,21 @@
               showToast("ดาวน์โหลดไฟล์สำเร็จ", 'success');
             }
           } else if (imagesToDownload.length > 1) {
-            // --- กรณี 2: โหลดหลายรูป (รวมเป็น ZIP ด้วย JSZip) ---
             const zip = new JSZip();
-            
             for (let i = 0; i < imagesToDownload.length; i++) {
               const imgData = imagesToDownload[i];
               setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดึงข้อมูลลง ZIP: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
-              
               const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
-              
               let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
               if (ext === 'jpeg') ext = 'jpg';
-              
-              // เพิ่มไฟล์ลงใน ZIP instance
               zip.file(`${imgData.ImageName || 'image_' + i}.${ext}`, blob);
             }
             
             setDownloadProgress(prev => ({ ...prev, status: 'กำลังเตรียมบีบอัดไฟล์ ZIP...' }));
-            
-            // สร้าง ZIP Blob และดักจับความคืบหน้า (Progress)
             const zipBlob = await zip.generateAsync({ type: 'blob' }, function updateCallback(metadata) {
               setDownloadProgress(prev => ({ ...prev, status: `กำลังบีบอัดไฟล์ ZIP... ${metadata.percent.toFixed(0)}%` }));
             });
             
-            // สั่งดาวน์โหลด ZIP
             const zipUrl = URL.createObjectURL(zipBlob);
             const a = document.createElement('a');
             a.href = zipUrl;
@@ -286,7 +272,6 @@
             a.click();
             document.body.removeChild(a);
             setTimeout(() => URL.revokeObjectURL(zipUrl), 1000);
-            
             showToast("ดาวน์โหลดชุดรูปภาพ (ZIP) สำเร็จ", 'success');
           }
         } catch (err) {
@@ -395,7 +380,6 @@
         for (const file of files) {
           if (!file.type.startsWith('image/')) continue;
           
-          // เก็บไฟล์ต้นฉบับไว้ก่อน ยังไม่แปลง Base64 ตอนนี้
           newStaged.push({
             id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2),
             imageName: file.name.split('.')[0],
@@ -421,7 +405,6 @@
         setIsUploading(true);
         const payloadImages = [];
         
-        // ประมวลผลภาพก่อนส่งเข้า API
         for (let i = 0; i < stagedFiles.length; i++) {
           const file = stagedFiles[i];
           let finalBase64;
@@ -496,12 +479,32 @@
         setItemToEdit(null);
       };
 
+      const handleConfirmBulkEdit = async (e) => {
+        e.preventDefault();
+        if (selectedIds.length === 0) return;
+        
+        const finalTab = bulkIsNewTab ? (bulkNewTabName || 'General') : bulkSelectedTab;
+        setIsProcessing(true);
+        
+        const result = await apiCall('POST', { action: "bulk_update_tab", ids: selectedIds, newTabName: finalTab });
+        
+        if (result.success && result.data.status === 'success') {
+          showToast(`ย้ายหมวดหมู่ ${result.data.count} รูปภาพสำเร็จ`, 'success');
+          const newImages = images.map(img => selectedIds.includes(img.ID) ? { ...img, TabName: finalTab } : img);
+          setImages(newImages);
+          updateTabsList(newImages);
+          setSelectedIds([]); 
+          setShowBulkEditModal(false);
+        } else {
+          showToast(result.error || "ย้ายหมวดหมู่ล้มเหลว", 'error');
+        }
+        setIsProcessing(false);
+      };
+
       const toggleSelection = (id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
       
       const galleryImages = activeTab === 'All' ? images : images.filter(img => img.TabName === activeTab);
       const adminImages = adminTab === 'All' ? images : images.filter(img => img.TabName === adminTab);
-      
-      // หา index ของรูปที่เปิดอยู่ เพื่อใช้สำหรับการเลื่อน ซ้าย-ขวา
       const currentImageIndex = selectedImage ? galleryImages.findIndex(img => img.ID === selectedImage.ID) : -1;
 
       return (
@@ -571,7 +574,6 @@
             {/* Gallery View */}
             {view === 'gallery' && (
               <div className="animate-fade-in">
-                {/* Tabs & Download Controller */}
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4 md:mb-8">
                   <div className="flex overflow-x-auto hidden-scrollbar gap-2 pb-2 md:pb-0 -mx-4 px-4 md:mx-0 md:px-0">
                     {tabs.map(tab => (
@@ -642,7 +644,6 @@
                   </div>
                 )}
                 
-                {/* Floating Download Button on Mobile & PC - Redesigned */}
                 {isDownloadMode && selectedDownloadIds.length > 0 && (
                    <div className="fixed bottom-8 left-0 right-0 flex justify-center z-[70] px-4 pointer-events-none animate-slide-up">
                      <button 
@@ -757,7 +758,6 @@
                           </div>
                           <div className="absolute top-2 right-2 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded blur-backdrop">{img.TabName}</div>
                           
-                          {/* Admin Buttons (Edit / Delete) */}
                           <div className="absolute bottom-2 right-2 flex gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                              <button onClick={(e) => { e.stopPropagation(); setItemToEdit(img); }} className="bg-white/90 text-gray-800 p-2 rounded-full shadow-md"><IconEdit2 size={14} /></button>
                              <button onClick={(e) => { e.stopPropagation(); setSelectedIds([img.ID]); setShowDeleteModal(true); }} className="bg-red-500/90 text-white p-2 rounded-full shadow-md"><IconTrash2 size={14} /></button>
@@ -767,15 +767,23 @@
                     </div>
                   )}
 
-                  {/* Floating Delete Button - Redesigned */}
+                  {/* Floating Action Bar - Bulk Edit & Bulk Delete */}
                   {selectedIds.length > 0 && (
                     <div className="fixed bottom-8 left-0 right-0 flex justify-center z-[70] px-4 pointer-events-none animate-slide-up">
-                      <button 
-                        onClick={() => setShowDeleteModal(true)} 
-                        className="pointer-events-auto w-full max-w-[320px] bg-red-500 hover:bg-red-600 text-white shadow-[0_8px_30px_rgb(239,68,68,0.2)] px-6 py-4 rounded-full text-[15px] font-bold flex items-center justify-center gap-2 transition-transform transform active:scale-95"
-                      >
-                        <IconTrash2 size={20} /> ลบรูปที่เลือก ({selectedIds.length})
-                      </button>
+                      <div className="pointer-events-auto w-full max-w-[360px] bg-gray-900 p-1.5 rounded-full shadow-[0_8px_30px_rgb(0,0,0,0.25)] flex gap-1 items-center">
+                        <button 
+                          onClick={() => setShowBulkEditModal(true)} 
+                          className="flex-1 bg-white/10 hover:bg-white/20 text-white px-4 py-3.5 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-colors"
+                        >
+                          <IconEdit2 size={16} /> ย้ายหมวดหมู่
+                        </button>
+                        <button 
+                          onClick={() => setShowDeleteModal(true)} 
+                          className="flex-1 bg-red-500 hover:bg-red-600 text-white px-4 py-3.5 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-colors"
+                        >
+                          <IconTrash2 size={16} /> ลบ ({selectedIds.length})
+                        </button>
+                      </div>
                     </div>
                   )}
                 </section>
@@ -783,7 +791,6 @@
             )}
           </main>
 
-          
           {/* Auth Modal */}
           {showAuthModal && (
             <div className="fixed inset-0 z-50 bg-black/50 blur-backdrop flex items-center justify-center p-4 animate-fade-in">
@@ -829,6 +836,54 @@
             </div>
           )}
 
+          {/* Bulk Edit Modal */}
+          {showBulkEditModal && (
+            <div className="fixed inset-0 z-50 bg-black/50 blur-backdrop flex items-center justify-center p-4 animate-fade-in">
+              <div className="bg-white rounded-3xl p-6 md:p-8 max-w-sm w-full shadow-2xl">
+                <div className="flex justify-between items-center mb-5">
+                  <h3 className="text-lg font-bold flex items-center gap-2"><IconEdit2 size={18} className="text-blue-500" /> เปลี่ยนหมวดหมู่</h3>
+                  <button onClick={() => setShowBulkEditModal(false)} className="text-gray-400 bg-gray-100 p-1.5 rounded-full"><IconX size={16} /></button>
+                </div>
+                <form onSubmit={handleConfirmBulkEdit}>
+                  <div className="space-y-4 mb-6">
+                    <div>
+                      <label className="block text-[12px] font-semibold text-gray-500 mb-2">เลือกหมวดหมู่ปลายทางสำหรับ <span className="text-blue-600 font-bold">{selectedIds.length}</span> รูป</label>
+                      <div className="flex flex-col gap-3">
+                        <select 
+                          value={bulkIsNewTab ? 'NEW' : bulkSelectedTab} 
+                          onChange={(e) => { 
+                            if (e.target.value === 'NEW') setBulkIsNewTab(true); 
+                            else { setBulkIsNewTab(false); setBulkSelectedTab(e.target.value); } 
+                          }} 
+                          className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-[14px] font-medium focus:outline-none focus:border-blue-500 transition-colors"
+                        >
+                          {tabs.filter(t => t !== 'All').map(t => <option key={t} value={t}>{t}</option>)}
+                          <option value="NEW">+ สร้างแท็บใหม่</option>
+                        </select>
+                        {bulkIsNewTab && (
+                          <input 
+                            type="text" required 
+                            value={bulkNewTabName} 
+                            onChange={(e) => setBulkNewTabName(e.target.value)} 
+                            placeholder="พิมพ์ชื่อแท็บใหม่..." 
+                            className="w-full border border-blue-400 bg-blue-50/30 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500 text-[14px] animate-fade-in" 
+                            autoFocus
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setShowBulkEditModal(false)} disabled={isProcessing} className="flex-1 bg-gray-100 text-gray-800 rounded-xl py-3 text-[14px] font-medium transition-colors hover:bg-gray-200">ยกเลิก</button>
+                    <button type="submit" disabled={isProcessing} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-3 text-[14px] font-medium flex items-center justify-center gap-2 transition-colors">
+                      {isProcessing ? <IconLoader2 size={16} className="animate-spin" /> : 'ยืนยันการย้าย'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
           {/* Delete Modal */}
           {showDeleteModal && (
             <div className="fixed inset-0 z-50 bg-black/50 blur-backdrop flex items-center justify-center p-4 animate-fade-in">
@@ -846,7 +901,7 @@
             </div>
           )}
 
-          {/* Edit Modal */}
+          {/* Edit Single Item Modal */}
           {itemToEdit && (
             <div className="fixed inset-0 z-50 bg-black/50 blur-backdrop flex items-end md:items-center justify-center md:p-4 animate-fade-in">
               <div className="bg-white rounded-t-3xl md:rounded-3xl overflow-hidden max-w-3xl w-full shadow-2xl flex flex-col md:flex-row max-h-[85vh] md:max-h-[80vh]">
@@ -876,12 +931,11 @@
             </div>
           )}
 
-          {/* Single Image Modal */}
+          {/* Single Image Detail Modal */}
           {selectedImage && (
             <div className="fixed inset-0 z-[60] bg-white md:bg-white/95 md:blur-backdrop flex flex-col md:flex-row md:items-center justify-center md:p-8 animate-fade-in">
               <button onClick={() => setSelectedImage(null)} className="absolute top-4 right-4 md:top-6 md:right-6 p-2 bg-gray-100/80 rounded-full z-[80] blur-backdrop shadow-sm"><IconX size={20} /></button>
               
-              {/* ปุ่มเลื่อนซ้าย */}
               {currentImageIndex > 0 && (
                 <button 
                   onClick={(e) => { e.stopPropagation(); setSelectedImage(galleryImages[currentImageIndex - 1]); }}
@@ -891,7 +945,6 @@
                 </button>
               )}
               
-              {/* ปุ่มเลื่อนขวา */}
               {currentImageIndex < galleryImages.length - 1 && (
                 <button 
                   onClick={(e) => { e.stopPropagation(); setSelectedImage(galleryImages[currentImageIndex + 1]); }}
@@ -912,7 +965,7 @@
                   <span className="inline-block px-3 py-1 bg-gray-100 text-gray-600 text-[11px] font-semibold rounded-full w-max">
                     {selectedImage.TabName}
                   </span>
-                  {selectedImage.Quality && (
+                  {selectedImage.Quality && selectedImage.Quality !== 'N/A' && (
                     <span className={`inline-block px-3 py-1 text-[11px] font-semibold rounded-full w-max ${selectedImage.Quality === 'UPfull' ? 'bg-purple-100 text-purple-600' : 'bg-green-100 text-green-600'}`}>
                       {selectedImage.Quality}
                     </span>
