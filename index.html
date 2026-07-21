@@ -9,6 +9,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -106,7 +107,9 @@
         setTouchEnd(null);
         setTouchStart(e.targetTouches[0].clientX);
       };
+      
       const onTouchMove = (e) => setTouchEnd(e.targetTouches[0].clientX);
+      
       const onTouchEndSwipe = (currentIndex, galleryList) => {
         if (!touchStart || !touchEnd) return;
         const distance = touchStart - touchEnd;
@@ -190,6 +193,113 @@
         }
       };
 
+      const getBlobFromUrlOrProxy = async (url, fileId) => {
+        // ข้ามการดึงภาพจาก URL (CDN) เพราะไฟล์จะถูกบีบอัด
+        // บังคับใช้ Proxy ดึงไฟล์ต้นฉบับจาก Drive โดยตรง 100%
+        try {
+          // เรียกใช้ฟังก์ชัน apiCallDownload เพื่อแทร็ก progress สดๆ
+          const proxyRes = await apiCallDownload({ action: 'download_proxy', fileId: fileId }, (loaded, total) => {
+             setDownloadProgress(prev => ({ ...prev, loadedMB: loaded, totalMB: total }));
+          });
+          
+          if (proxyRes.success && proxyRes.data.status === 'success') {
+            const byteCharacters = atob(proxyRes.data.base64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            
+            // อัปเดตขนาดที่แท้จริงหลังจากคำนวณ Base64 เสร็จ
+            const actualMB = (byteArray.length / (1024 * 1024)).toFixed(2);
+            setDownloadProgress(prev => ({ ...prev, loadedMB: actualMB, totalMB: actualMB }));
+            
+            return new Blob([byteArray], { type: proxyRes.data.mimeType });
+          }
+          throw new Error("Proxy download failed");
+        } catch (error) {
+          throw new Error("Unable to download original image");
+        }
+      };
+
+      const processDownloads = async (imagesToDownload) => {
+        setIsDownloading(true);
+        setDownloadProgress({ current: 0, total: imagesToDownload.length, status: 'กำลังเตรียมไฟล์...', loadedMB: '0.00', totalMB: '0.00' });
+        
+        try {
+          if (imagesToDownload.length === 1) {
+            // --- กรณี 1: โหลดรูปเดียว (Direct Download) ---
+            const imgData = imagesToDownload[0];
+            setDownloadProgress({ current: 1, total: 1, status: `กำลังดาวน์โหลด: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
+            
+            const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
+            
+            let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
+            if (ext === 'jpeg') ext = 'jpg';
+            
+            const file = new File([blob], `${imgData.ImageName || 'image_0'}.${ext}`, { type: blob.type || 'image/jpeg' });
+            
+            if (isIOS && navigator.canShare && navigator.canShare({ files: [file] })) {
+              await navigator.share({ files: [file], title: 'ดาวน์โหลดรูปภาพ' });
+              showToast("ระบบส่งไฟล์เรียบร้อย", 'success');
+            } else {
+              const blobUrl = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = blobUrl;
+              a.download = `${imgData.ImageName || 'image_0'}.${ext}`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+              showToast("ดาวน์โหลดไฟล์สำเร็จ", 'success');
+            }
+          } else if (imagesToDownload.length > 1) {
+            // --- กรณี 2: โหลดหลายรูป (รวมเป็น ZIP ด้วย JSZip) ---
+            const zip = new JSZip();
+            
+            for (let i = 0; i < imagesToDownload.length; i++) {
+              const imgData = imagesToDownload[i];
+              setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดึงข้อมูลลง ZIP: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
+              
+              const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
+              
+              let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
+              if (ext === 'jpeg') ext = 'jpg';
+              
+              // เพิ่มไฟล์ลงใน ZIP instance
+              zip.file(`${imgData.ImageName || 'image_' + i}.${ext}`, blob);
+            }
+            
+            setDownloadProgress(prev => ({ ...prev, status: 'กำลังเตรียมบีบอัดไฟล์ ZIP...' }));
+            
+            // สร้าง ZIP Blob และดักจับความคืบหน้า (Progress)
+            const zipBlob = await zip.generateAsync({ type: 'blob' }, function updateCallback(metadata) {
+              setDownloadProgress(prev => ({ ...prev, status: `กำลังบีบอัดไฟล์ ZIP... ${metadata.percent.toFixed(0)}%` }));
+            });
+            
+            // สั่งดาวน์โหลด ZIP
+            const zipUrl = URL.createObjectURL(zipBlob);
+            const a = document.createElement('a');
+            a.href = zipUrl;
+            a.download = `Gallery_Download_${new Date().getTime()}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(zipUrl), 1000);
+            
+            showToast("ดาวน์โหลดชุดรูปภาพ (ZIP) สำเร็จ", 'success');
+          }
+        } catch (err) {
+          if (err.name !== "AbortError") showToast("เกิดข้อผิดพลาดในการแชร์หรือดาวน์โหลดไฟล์", 'error');
+          console.error(err);
+        }
+        
+        setIsDownloading(false);
+        setIsDownloadMode(false);
+        setSelectedDownloadIds([]);
+        if (selectedImage) setSelectedImage(null); 
+      };
+
       useEffect(() => {
         fetchImagesData();
       }, []);
@@ -217,7 +327,6 @@
         setIsProcessing(true);
         setAuthError('');
 
-        // ใช้ API Call แทน google.script.run เพื่อแก้ปัญหาทะลุบล็อก
         const result = await apiCall('POST', { action: 'verifyLogin', password: authPassword });
         setIsProcessing(false);
 
@@ -292,8 +401,8 @@
             imageName: file.name.split('.')[0],
             description: '',
             link: '',
-            rawFile: file, // เก็บไฟล์ดิบไว้ใช้ตอนกดอัพโหลด
-            preview: URL.createObjectURL(file) // สร้าง URL จำลองให้แสดงภาพตัวอย่าง
+            rawFile: file, 
+            preview: URL.createObjectURL(file)
           });
         }
         setStagedFiles(prev => [...prev, ...newStaged]);
@@ -317,7 +426,6 @@
           const file = stagedFiles[i];
           let finalBase64;
           
-          // เช็คเงื่อนไขคุณภาพไฟล์ ณ วินาทีที่กดอัพโหลด
           if (uploadQuality === 'original') {
             finalBase64 = await new Promise((res) => {
               const r = new FileReader();
@@ -334,14 +442,13 @@
             link: file.link,
             tabName: finalTabName,
             base64: finalBase64,
-            quality: uploadQuality === 'web' ? 'UPsoft' : 'UPfull' // ส่งคุณภาพไฟล์ไป Backend
+            quality: uploadQuality === 'web' ? 'UPsoft' : 'UPfull' 
           });
         }
 
         const result = await apiCall('POST', { action: "upload", images: payloadImages });
         if (result.success && result.data.status === 'success') {
           showToast("อัพโหลดสำเร็จ!", 'success');
-          // คืนค่าหน่วยความจำที่ใช้แสดงภาพตัวอย่าง
           stagedFiles.forEach(f => URL.revokeObjectURL(f.preview));
           setStagedFiles([]);
           setIsGlobalNewTab(false);
@@ -351,97 +458,6 @@
           showToast(result.error || "การอัพโหลดล้มเหลว", 'error');
         }
         setIsUploading(false);
-      };
-
-      const getBlobFromUrlOrProxy = async (url, fileId) => {
-        // ข้ามการดึงภาพจาก URL (CDN) เพราะไฟล์จะถูกบีบอัด
-        // บังคับใช้ Proxy ดึงไฟล์ต้นฉบับจาก Drive โดยตรง 100%
-        try {
-          // เรียกใช้ฟังก์ชัน apiCallDownload เพื่อแทร็ก progress สดๆ
-          const proxyRes = await apiCallDownload({ action: 'download_proxy', fileId: fileId }, (loaded, total) => {
-             setDownloadProgress(prev => ({ ...prev, loadedMB: loaded, totalMB: total }));
-          });
-          
-          if (proxyRes.success && proxyRes.data.status === 'success') {
-            const byteCharacters = atob(proxyRes.data.base64);
-            const byteNumbers = new Array(byteCharacters.length);
-            for (let i = 0; i < byteCharacters.length; i++) {
-              byteNumbers[i] = byteCharacters.charCodeAt(i);
-            }
-            const byteArray = new Uint8Array(byteNumbers);
-            
-            // อัปเดตขนาดที่แท้จริงหลังจากคำนวณ Base64 เสร็จ
-            const actualMB = (byteArray.length / (1024 * 1024)).toFixed(2);
-            setDownloadProgress(prev => ({ ...prev, loadedMB: actualMB, totalMB: actualMB }));
-            
-            return new Blob([byteArray], { type: proxyRes.data.mimeType });
-          }
-          throw new Error("Proxy download failed");
-        } catch (error) {
-          throw new Error("Unable to download original image");
-        }
-      };
-
-      const processDownloads = async (imagesToDownload) => {
-        setIsDownloading(true);
-        setDownloadProgress({ current: 0, total: imagesToDownload.length, status: 'กำลังเตรียมไฟล์...', loadedMB: '0.00', totalMB: '0.00' });
-        
-        if (isIOS) {
-          try {
-            const filesArray = [];
-            for (let i = 0; i < imagesToDownload.length; i++) {
-              const imgData = imagesToDownload[i];
-              setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดึงข้อมูล: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
-              
-              const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
-              
-              // ดึงนามสกุลไฟล์จาก MIME Type ของ Blob (ดักจับ jpeg ให้เป็น jpg เพื่อความสวยงาม)
-              let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
-              if (ext === 'jpeg') ext = 'jpg';
-              
-              const file = new File([blob], `${imgData.ImageName || 'image_'+i}.${ext}`, { type: blob.type || 'image/jpeg' });
-              filesArray.push(file);
-            }
-            setDownloadProgress(prev => ({ ...prev, status: 'กำลังเปิดหน้าต่างบันทึก...' }));
-            if (navigator.canShare && navigator.canShare({ files: filesArray })) {
-              await navigator.share({ files: filesArray, title: 'ดาวน์โหลดรูปภาพ' });
-              showToast("ระบบส่งไฟล์เรียบร้อย", 'success');
-            } else {
-              showToast("อุปกรณ์ไม่รองรับการเซฟหลายไฟล์พร้อมกัน", 'error');
-            }
-          } catch(err) {
-            if (err.name !== "AbortError") showToast("เกิดข้อผิดพลาดในการแชร์ไฟล์", 'error');
-          }
-        } else {
-          for (let i = 0; i < imagesToDownload.length; i++) {
-            const imgData = imagesToDownload[i];
-            setDownloadProgress({ current: i + 1, total: imagesToDownload.length, status: `กำลังดาวน์โหลด: ${imgData.ImageName || 'รูปภาพ'}`, loadedMB: '0.00', totalMB: '?' });
-            try {
-              const blob = await getBlobFromUrlOrProxy(imgData.DriveFileUrl, imgData.DriveFileId);
-              
-              // ดึงนามสกุลไฟล์จาก MIME Type ของ Blob
-              let ext = blob.type ? blob.type.split('/')[1] : 'jpg';
-              if (ext === 'jpeg') ext = 'jpg';
-              
-              const blobUrl = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = blobUrl;
-              a.download = `${imgData.ImageName || 'image_'+i}.${ext}`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-            } catch(e) {
-              console.error("Download failed for", imgData.ImageName);
-            }
-            await new Promise(res => setTimeout(res, 400)); // Delay
-          }
-          showToast("ดาวน์โหลดไฟล์สำเร็จ", 'success');
-        }
-        setIsDownloading(false);
-        setIsDownloadMode(false);
-        setSelectedDownloadIds([]);
-        if (selectedImage) setSelectedImage(null); 
       };
 
       const handleConfirmBulkDelete = async () => {
@@ -552,7 +568,7 @@
 
           <main className="max-w-7xl mx-auto px-4 md:px-6 py-4 md:py-8">
             
-            {}
+            {/* Gallery View */}
             {view === 'gallery' && (
               <div className="animate-fade-in">
                 {/* Tabs & Download Controller */}
@@ -640,7 +656,7 @@
               </div>
             )}
 
-            {}
+            {/* Admin View */}
             {view === 'admin' && (
               <div className="animate-fade-in space-y-8">
                 {/* Upload Section */}
